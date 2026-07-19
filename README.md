@@ -8,9 +8,10 @@ Amp extends via TypeScript [plugins](https://ampcode.com/manual#plugins).
 
 | Plugin | Description |
 |--------|-------------|
+| [copy](./plugins/copy.ts) | Command-palette action that copies the last completed assistant turn to the clipboard as Markdown (macOS; no third-party dependencies) |
 | [grok-45-custom-mode](./plugins/grok-45-custom-mode.ts) | Grok 4.5 agent mode with a full system prompt — xAI's Grok Build CLI prompt (action safety, output style) blended with Amp's published mode prompts (tool doctrine, discovery, verification) |
 
-Each plugin is a single `.ts` file under [`plugins/`](./plugins/).
+Plugin entry points live under [`plugins/`](./plugins/).
 
 ## Install
 
@@ -27,6 +28,8 @@ amp plugins add --auto-update \
 - Project-only: add `--target workspace` (installs to `.amp/plugins`)
 
 Then reload plugins in Amp (`Ctrl+O` → `plugins: reload`) or restart the CLI.
+
+`copy` is macOS-only. It writes through Apple's built-in JXA/AppKit bridge and does not require an npm package, LaunchAgent, or terminal-specific clipboard support.
 
 ### Local copy / development
 
@@ -50,7 +53,7 @@ amp plugins remove https://raw.githubusercontent.com/ben-vargas/amp-plugins/main
 
 ### Update
 
-Plugins installed with `--auto-update` refresh when Amp loads plugins, if the file includes an `@amp-plugin` directive pointing at the source URL. Manual update:
+Plugins installed with `--auto-update` refresh when Amp loads plugins. Trigger an update manually with:
 
 ```bash
 amp plugins update
@@ -60,7 +63,7 @@ amp plugins update
 
 ```text
 amp-plugins/
-  plugins/     # one .ts file per plugin
+  plugins/     # plugin entry points
   README.md
 ```
 
@@ -74,12 +77,6 @@ import type { PluginAPI } from '@ampcode/plugin'
 export default function (amp: PluginAPI) {
   amp.logger.log('plugin initialized')
 }
-```
-
-For auto-update support after `amp plugins add --auto-update <url>`, include:
-
-```ts
-// @amp-plugin updated automatically from https://raw.githubusercontent.com/ben-vargas/amp-plugins/main/plugins/<name>.ts
 ```
 
 See the [Amp plugin guide](https://ampcode.com/manual#plugins) and [Plugin API reference](https://ampcode.com/manual/plugin-api).
