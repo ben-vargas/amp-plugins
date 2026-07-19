@@ -1,4 +1,3 @@
-// @amp-plugin updated automatically from https://raw.githubusercontent.com/ben-vargas/amp-plugins/main/plugins/copy.ts
 import type { PluginAPI, PluginThread, ThreadMessage } from '@ampcode/plugin'
 
 const PAGE_SIZE = 20

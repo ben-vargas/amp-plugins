@@ -1,4 +1,3 @@
-// @amp-plugin updated automatically from https://raw.githubusercontent.com/ben-vargas/amp-plugins/main/plugins/grok-45-custom-mode.ts
 // @amp-agent-mode {"key":"grok45-custom","label":"Grok 4.5 Custom"}
 //
 // Grok 4.5 mode with a full system prompt, synthesized from:

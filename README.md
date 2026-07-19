@@ -20,7 +20,7 @@ Requires the [Amp CLI](https://ampcode.com/manual#get-started) (binary install; 
 ### One plugin (recommended)
 
 ```bash
-amp plugins add --auto-update \
+amp plugins add \
   https://raw.githubusercontent.com/ben-vargas/amp-plugins/main/plugins/<name>.ts
 ```
 
@@ -53,11 +53,7 @@ amp plugins remove https://raw.githubusercontent.com/ben-vargas/amp-plugins/main
 
 ### Update
 
-Plugins installed with `--auto-update` refresh when Amp loads plugins. Trigger an update manually with:
-
-```bash
-amp plugins update
-```
+Re-run `amp plugins add <url>` or replace the local file with the latest version. Amp currently restricts automatic updates to allowed Amp-hosted plugin URLs, so raw GitHub plugins update manually.
 
 ## Layout
 
