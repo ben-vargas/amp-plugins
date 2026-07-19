@@ -8,7 +8,7 @@ Amp extends via TypeScript [plugins](https://ampcode.com/manual#plugins).
 
 | Plugin | Description |
 |--------|-------------|
-| — | No plugins yet |
+| [grok-45-custom-mode](./plugins/grok-45-custom-mode.ts) | Grok 4.5 agent mode with a full system prompt — xAI's Grok Build CLI prompt (action safety, output style) blended with Amp's published mode prompts (tool doctrine, discovery, verification) |
 
 Each plugin is a single `.ts` file under [`plugins/`](./plugins/).
 
