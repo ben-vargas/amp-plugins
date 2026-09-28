@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Prepares an Amp orb: Go toolchain, the CLIProxyAPI binary built from
-# CLIPROXY_REPO, the Claude Code CLI, and Tailscale (installed but left stopped).
+# CLIPROXY_REPO, the Claude Code CLI, Tailscale (installed but left stopped), and
+# the published amp-cli-proxy-api skill in .agents/skills/.
 # Safe to run repeatedly. Installed by the amp-cli-proxy-api skill.
 set -euo pipefail
 
@@ -76,6 +77,13 @@ install_tailscale() {
 	sudo systemctl daemon-reload
 }
 
+install_skill() {
+	# The skill is for agents working in this repository; the proxy does not need it.
+	.agents/cliproxy-host skill ||
+		echo "    warning: could not install the amp-cli-proxy-api skill; run .agents/cliproxy-host skill later"
+}
+
+step "amp-cli-proxy-api skill" install_skill
 # The source's go.mod decides the Go version, so fetch before installing Go.
 step "CLIProxyAPI source" .agents/cliproxy-host fetch
 step "Go toolchain" install_go

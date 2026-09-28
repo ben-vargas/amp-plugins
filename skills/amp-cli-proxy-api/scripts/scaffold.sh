@@ -5,7 +5,9 @@
 #
 # Writes .agents/setup, .agents/resume, .agents/cliproxy-host, .amp/services.yaml,
 # .amp/plugins/cliproxy-host-keepalive.ts, copies this skill to
-# .agents/skills/amp-cli-proxy-api, and appends missing .gitignore entries.
+# .agents/skills/amp-cli-proxy-api, and appends missing .gitignore entries. That skill
+# copy is ignored by Git; .agents/setup reinstalls it from the published skill
+# (cliproxy-host skill).
 #
 # Before writing anything it checks every destination. If one already exists with
 # different content it lists them and exits 3 without changing anything; rerun
@@ -83,11 +85,11 @@ done
 gitignore="$target/.gitignore"
 touch "$gitignore"
 added=0
-for entry in /src/ /bin/ /config.yaml /static/ /logs/ .amp/portals/; do
+for entry in /src/ /bin/ /config.yaml /static/ /logs/ .amp/portals/ /.agents/skills/amp-cli-proxy-api/; do
 	if ! grep -qxF "$entry" "$gitignore"; then
 		if ((added == 0)); then
 			[[ -s "$gitignore" && -n "$(tail -c1 "$gitignore")" ]] && echo >>"$gitignore"
-			echo "# amp-cli-proxy-api: CLIProxyAPI source, build output, and runtime state" >>"$gitignore"
+			echo "# amp-cli-proxy-api: CLIProxyAPI source, build output, runtime state, and the installed skill" >>"$gitignore"
 		fi
 		echo "$entry" >>"$gitignore"
 		added=$((added + 1))

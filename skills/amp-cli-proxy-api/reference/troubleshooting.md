@@ -18,6 +18,8 @@
 | Debug output missing after editing `config.yaml` | The file was replaced rather than edited in place; restart the service. |
 | Amp threads still use Amp credits | The connection is inactive, another active connection wins precedence, or the mapping does not include the model. Check `list`, then run `amp config model-providers check-access --provider-model anthropic/<model>` and compare the serving connection ID. |
 | Proxy still runs the old source after changing `CLIPROXY_REPO`/`CLIPROXY_REF` | Run `amp orb restart-processes`, then `.agents/setup` (or `.agents/cliproxy-host update` when the Go version is unchanged). |
+| The `amp-cli-proxy-api` skill is missing in an orb | Setup could not install it (it only warns). Run `.agents/cliproxy-host skill`; check `CLIPROXY_SKILL_REPO`/`CLIPROXY_SKILL_REF` if it fails. |
+| `.agents/skills/amp-cli-proxy-api/` shows as tracked or modified in Git | The project was scaffolded before the skill copy was ignored. Rerun `scaffold.sh --force .` (adds the ignore entry), then `git rm -r --cached .agents/skills/amp-cli-proxy-api` and commit. |
 | `scaffold.sh` exits 3 | Managed files already exist with other content; nothing changed. Merge by hand, or rerun with `--force` after the user approves. |
 
 Claude requests from non-Claude-Code clients such as Amp are cloaked by CLIProxyAPI's default

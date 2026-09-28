@@ -6,6 +6,8 @@ Run in the host orb from the repository root (`~/workspace/repo`).
 |---|---|
 | Status | `.agents/cliproxy-host status` |
 | Deploy the latest source | `.agents/cliproxy-host update` |
+| Refresh the skill from its published source | `.agents/cliproxy-host skill` |
+| Apply new skill templates to the host files | `.agents/cliproxy-host skill`, then `bash .agents/skills/amp-cli-proxy-api/scripts/scaffold.sh --force .`, then commit and push |
 | Follow logs | `sudo journalctl -u amp-svc-cliproxy -f` |
 | Recent logs | `amp orb service logs cliproxy -n 200` |
 | Routed requests and models | `sudo journalctl -u amp-svc-cliproxy \| grep 'Use OAuth'` |

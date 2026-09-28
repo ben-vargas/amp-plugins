@@ -64,6 +64,7 @@ Ask only when needed, and propose defaults.
 | CLIProxyAPI source | `https://github.com/router-for-me/CLIProxyAPI`, `main` | env `CLIPROXY_REPO`, `CLIPROXY_REF` (only if different; must be publicly clonable) |
 | Tailscale hostname | `amp-cli-proxy-api` | env `CLIPROXY_TS_HOSTNAME` (only if different) |
 | Tailscale tag | `tag:amp-cli-proxy-api` | env `CLIPROXY_TS_TAG` (only if different) |
+| Skill source | `https://github.com/ben-vargas/amp-plugins`, `main` (path `skills/amp-cli-proxy-api`) | env `CLIPROXY_SKILL_REPO`, `CLIPROXY_SKILL_REF` (only for a fork of the skill) |
 | Trust credential client ID and audience | from step 3 | env `TS_CLIENT_ID`, `TS_AUDIENCE` |
 | Proxy API key | user generates | secret `CLIPROXY_API_KEY` |
 | Models to route | Claude models the proxy lists | Custom URL model mapping |
@@ -85,7 +86,9 @@ Ask only when needed, and propose defaults.
 4. Install the host files: `bash <this-skill>/scripts/scaffold.sh <dir>`. It writes
    `.agents/setup`, `.agents/resume`, `.agents/cliproxy-host`, `.amp/services.yaml`,
    `.amp/plugins/cliproxy-host-keepalive.ts`, copies this skill into
-   `.agents/skills/amp-cli-proxy-api/`, and adds `.gitignore` entries. If it exits 3, some of
+   `.agents/skills/amp-cli-proxy-api/`, and adds `.gitignore` entries. The skill copy is
+   ignored by Git: `.agents/setup` installs the published skill in every orb
+   (`cliproxy-host skill`), so it is never maintained in the project. If it exits 3, some of
    those files already exist with other content; nothing was changed. Show the user the list.
    Either merge by hand (keep their setup steps and services, add ours) or, only with their
    explicit approval, rerun with `--force` to replace them.
@@ -126,8 +129,9 @@ audience at the end.
 
 The host must be an orb thread of this project, started after the files were pushed so setup
 ran. If you are not in one, create one with `create_thread` (executor `orb`, the project) and a
-prompt asking it to use the `amp-cli-proxy-api` skill and continue from step 5. The skill is in
-that repository, so the new thread has it.
+prompt asking it to use the `amp-cli-proxy-api` skill and continue from step 5. Setup installs
+the skill in that orb, so the new thread has it (if it does not, run
+`.agents/cliproxy-host skill` there).
 
 In the host orb, from the repository root:
 

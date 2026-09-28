@@ -19,10 +19,12 @@
 #            Tailscale SSH; the teardown finishes even though the session drops)
 #   reclaim  take back the exact hostname after the node joined as <hostname>-1
 #            and the old machine was removed from the tailnet
+#   skill    install the published amp-cli-proxy-api skill into .agents/skills/
+#            (called by .agents/setup; the copy there is not tracked in Git)
 #
 # Project settings: TS_CLIENT_ID and TS_AUDIENCE (Tailscale OIDC trust credential)
 # and the CLIPROXY_API_KEY secret. Optional: CLIPROXY_REPO, CLIPROXY_REF,
-# CLIPROXY_TS_HOSTNAME, CLIPROXY_TS_TAG.
+# CLIPROXY_TS_HOSTNAME, CLIPROXY_TS_TAG, CLIPROXY_SKILL_REPO, CLIPROXY_SKILL_REF.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -31,6 +33,10 @@ CLIPROXY_REPO="${CLIPROXY_REPO:-https://github.com/router-for-me/CLIProxyAPI}"
 CLIPROXY_REF="${CLIPROXY_REF:-main}"
 TS_HOSTNAME="${CLIPROXY_TS_HOSTNAME:-amp-cli-proxy-api}"
 TS_TAG="${CLIPROXY_TS_TAG:-tag:amp-cli-proxy-api}"
+CLIPROXY_SKILL_REPO="${CLIPROXY_SKILL_REPO:-https://github.com/ben-vargas/amp-plugins}"
+CLIPROXY_SKILL_REF="${CLIPROXY_SKILL_REF:-main}"
+SKILL_SRC=skills/amp-cli-proxy-api
+SKILL_DIR=.agents/skills/amp-cli-proxy-api
 PROXY_PORT=8317
 # Also read by .amp/plugins/cliproxy-host-keepalive.ts.
 MARKER="$HOME/.config/cliproxy-host/enabled"
@@ -70,6 +76,24 @@ cmd_build() {
 		-o ../bin/cli-proxy-api.new ./cmd/server)
 	mv bin/cli-proxy-api.new bin/cli-proxy-api
 	echo "built bin/cli-proxy-api (${commit})"
+}
+
+# Replaces .agents/skills/amp-cli-proxy-api with SKILL_SRC from CLIPROXY_SKILL_REPO,
+# so the skill has one published source instead of a copy in every host repository.
+cmd_skill() {
+	# Global, because the EXIT trap runs after this function's locals are gone.
+	SKILL_TMP="$(mktemp -d)"
+	trap 'rm -rf "$SKILL_TMP"' EXIT
+	local tmp="$SKILL_TMP"
+	git clone --quiet --depth 1 --filter=blob:none --sparse \
+		--branch "$CLIPROXY_SKILL_REF" "$CLIPROXY_SKILL_REPO" "$tmp/repo"
+	git -C "$tmp/repo" sparse-checkout set "$SKILL_SRC"
+	[[ -f "$tmp/repo/$SKILL_SRC/SKILL.md" ]] ||
+		die "no $SKILL_SRC/SKILL.md in ${CLIPROXY_SKILL_REPO}@${CLIPROXY_SKILL_REF}"
+	rm -rf "$SKILL_DIR"
+	mkdir -p "$(dirname "$SKILL_DIR")"
+	cp -R "$tmp/repo/$SKILL_SRC" "$SKILL_DIR"
+	echo "skill: ${CLIPROXY_SKILL_REPO}@${CLIPROXY_SKILL_REF} ($(git -C "$tmp/repo" rev-parse --short HEAD)) -> $SKILL_DIR"
 }
 
 cmd_update() {
@@ -232,5 +256,6 @@ resume) cmd_resume ;;
 status) cmd_status ;;
 disable) cmd_disable ;;
 reclaim) cmd_reclaim ;;
-*) die "usage: $0 fetch|build|update|serve|enable|resume|status|disable|reclaim" ;;
+skill) cmd_skill ;;
+*) die "usage: $0 fetch|build|update|serve|enable|resume|status|disable|reclaim|skill" ;;
 esac
