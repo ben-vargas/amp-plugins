@@ -89,8 +89,8 @@ allow-all policy needs nothing.
 ## 5. After `enable`
 
 The Machines page should show the host with the tag and badges **Ephemeral**, **SSH** (if
-enabled), and **Funnel**. If the name has a `-1` suffix, an older node still holds the name;
-see troubleshooting.
+enabled), and **Funnel**. If the name has a `-1` suffix, an older node still holds the name:
+have the user remove it on this page, then run `.agents/cliproxy-host reclaim`.
 
 From a tailnet device: `tailscale ssh user@<hostname>`, or `ssh user@<hostname>` when that
 device uses Tailscale DNS. Devices without Tailscale DNS can use the full `…ts.net` name

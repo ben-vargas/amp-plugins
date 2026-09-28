@@ -28,8 +28,12 @@ thread doing the work. Order:
 1. The user deactivates the Custom URL connection in Amp Model Routing (threads fall back to
    Amp) or you do it with `manage_amp` `model_providers` `deactivate`.
 2. Start a new orb thread in the project and let setup finish.
-3. On the old host, run `.agents/cliproxy-host disable` (the user can do this over SSH).
-4. On the new host, run `enable`, then the Claude login.
+3. On the old host, run `.agents/cliproxy-host disable`, preferably from its Amp Terminal tab.
+   Over Tailscale SSH the session drops as the node leaves (the teardown still finishes). Then
+   have the user confirm the old machine is gone from the Tailscale Machines page and remove it
+   there if it lingers; otherwise the new node joins as `<hostname>-1`.
+4. On the new host, run `enable`, then the Claude login. If the node still came up as
+   `<hostname>-1`, remove the old machine and run `.agents/cliproxy-host reclaim`.
 5. When `https://<hostname>.<tailnet>.ts.net/healthz` answers from outside, reactivate the
    connection. The URL and key are unchanged.
 

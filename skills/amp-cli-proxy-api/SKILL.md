@@ -141,7 +141,9 @@ In the host orb, from the repository root:
    `enabled: this orb is the CLIProxyAPI host and will be kept awake`.
 4. On failure, see `reference/troubleshooting.md`. A 403 token exchange almost always means a
    trust-credential field mismatch; ask the user for a screenshot of the credential page, which
-   shows the failing claim.
+   shows the failing claim. A warning that another machine holds the hostname means the node
+   joined as `<hostname>-1`: have the user remove the old machine on the Tailscale Machines
+   page, then run `.agents/cliproxy-host reclaim`.
 
 ### 6. Log in to Claude
 
@@ -222,4 +224,6 @@ cost, and that archiving the host thread takes the proxy offline. Point to
   thread unless the user first deactivated the Custom URL connection.
 - Never print `config.yaml`, `~/.cli-proxy-api/*.json`, `CLIPROXY_API_KEY`, or ID tokens.
 - Never authenticate anything in `.agents/setup`; its output is shared through snapshots.
-- Only one node can hold the hostname. Disable the old host before enabling a new one.
+- Only one node can hold the hostname. Disable the old host (preferably from its Amp Terminal
+  tab, not over Tailscale SSH) and confirm it is gone from the Machines page before enabling a
+  new one.

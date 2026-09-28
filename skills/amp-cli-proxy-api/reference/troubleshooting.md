@@ -6,7 +6,8 @@
 | `enable`: `TS_CLIENT_ID is not set` (or another variable) | Add it to the project, then `amp orb restart-processes`. |
 | `enable`: `tailscale funnel failed` | No `funnel` node attribute for the tag, or HTTPS certificates are off for the tailnet. |
 | `tailscaled` stuck in `NeedsLogin` without an error | The systemd drop-in from `.agents/setup` is missing; rerun setup (E2B network detection). |
-| Node named `<hostname>-1` | An older node holds the name. `disable` the old host or delete it in the console, then `sudo tailscale set --hostname=<hostname>` and `.agents/cliproxy-host resume`. |
+| Node named `<hostname>-1` | An older node holds the name. Remove it on the Tailscale Machines page, then run `.agents/cliproxy-host reclaim`. A plain `tailscale set --hostname` left the node on `-1` with Funnel still serving the old name; `reclaim` renames through a temporary name and resets Funnel. Public requests can fail for a few minutes afterwards while DNS and the relay catch up. |
+| Old machine still listed after `disable` | The logout did not reach Tailscale (older scripts died with the Tailscale SSH session). Remove it on the Machines page; ephemeral nodes are also removed 30–60 minutes after going offline. |
 | Public name does not resolve | New Funnel DNS can take about 10 minutes. Check with `dig @8.8.8.8`; direct queries to the `ts.net` authoritative servers returned empty answers even after public resolvers had the record. |
 | `/v1/models` 401 with the right key | The running proxy has an old `config.yaml`. Rerun `enable` (restarts on key change) or restart the service. |
 | `/v1/models` returns an empty list | No provider is logged in; do the Claude login. |

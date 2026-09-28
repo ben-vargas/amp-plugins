@@ -15,7 +15,10 @@
 #   resume   no-op unless enabled; otherwise rejoin the tailnet and re-apply Funnel
 #            (called by .agents/resume after every wake)
 #   status   show build, host, Tailscale, Funnel, and service state
-#   disable  leave the tailnet and stop keeping this orb awake
+#   disable  leave the tailnet and stop keeping this orb awake (safe to run over
+#            Tailscale SSH; the teardown finishes even though the session drops)
+#   reclaim  take back the exact hostname after the node joined as <hostname>-1
+#            and the old machine was removed from the tailnet
 #
 # Project settings: TS_CLIENT_ID and TS_AUDIENCE (Tailscale OIDC trust credential)
 # and the CLIPROXY_API_KEY secret. Optional: CLIPROXY_REPO, CLIPROXY_REF,
@@ -140,7 +143,7 @@ connect() {
 	dns="${dns%.}"
 	echo "Custom URL base: https://$dns/v1"
 	[[ "$dns" == "$TS_HOSTNAME".* ]] ||
-		echo "warning: another machine still holds $TS_HOSTNAME. Remove it in the Tailscale admin console, then run: sudo tailscale set --hostname=$TS_HOSTNAME" >&2
+		echo "warning: another machine still holds $TS_HOSTNAME. Remove it in the Tailscale admin console, then run: .agents/cliproxy-host reclaim" >&2
 }
 
 cmd_enable() {
@@ -178,14 +181,45 @@ cmd_status() {
 
 cmd_disable() {
 	rm -f "$MARKER"
-	if systemctl is-active --quiet tailscaled; then
-		sudo tailscale funnel reset || true
-		# Logging out removes the ephemeral node now, freeing the hostname.
-		sudo tailscale logout || true
-	fi
-	sudo systemctl disable --now tailscaled >/dev/null 2>&1 || true
 	amp orb service stop cliproxy || true
+	# Leaving the tailnet cuts any Tailscale SSH session running this command, and the
+	# hangup would kill a teardown that runs here before the logout reaches Tailscale.
+	# A separate systemd unit keeps going when this session drops. Logging out
+	# removes the ephemeral node now, freeing the hostname.
+	sudo systemd-run --quiet --collect --wait --unit="cliproxy-host-disable-$$" \
+		bash -c 'if systemctl is-active --quiet tailscaled; then
+			tailscale funnel reset || true
+			tailscale logout || true
+		fi
+		systemctl disable --now tailscaled >/dev/null 2>&1 || true' || true
 	echo "disabled: left the tailnet and stopped keeping this orb awake"
+	echo "check that the old machine is gone from the Tailscale Machines page before enabling another host"
+}
+
+# Waits up to 30 seconds for this node's DNS name to start with "$1.".
+wait_for_dns_name() {
+	local i dns
+	for i in $(seq 1 15); do
+		dns="$(ts_json | jq -r '.Self.DNSName // ""')"
+		[[ "$dns" == "$1".* ]] && return 0
+		sleep 2
+	done
+	return 1
+}
+
+# Takes back the exact hostname after an older node that held it was removed.
+# A plain "tailscale set --hostname" can leave the node on its -N name, and Funnel
+# keeps serving the old name, so rename through a temporary name and reset Funnel.
+cmd_reclaim() {
+	[[ -f "$MARKER" ]] || die "this orb is not the host; run enable first"
+	sudo tailscale set --hostname="${TS_HOSTNAME}-tmp"
+	wait_for_dns_name "${TS_HOSTNAME}-tmp" || die "rename to ${TS_HOSTNAME}-tmp did not take effect"
+	sudo tailscale set --hostname="$TS_HOSTNAME"
+	wait_for_dns_name "$TS_HOSTNAME" ||
+		die "$TS_HOSTNAME is still taken; remove the old machine in the Tailscale admin console and run reclaim again"
+	sudo tailscale funnel reset
+	connect
+	echo "public DNS and the Funnel relay can take a few minutes to follow the new name"
 }
 
 case "${1:-}" in
@@ -197,5 +231,6 @@ enable) cmd_enable ;;
 resume) cmd_resume ;;
 status) cmd_status ;;
 disable) cmd_disable ;;
-*) die "usage: $0 fetch|build|update|serve|enable|resume|status|disable" ;;
+reclaim) cmd_reclaim ;;
+*) die "usage: $0 fetch|build|update|serve|enable|resume|status|disable|reclaim" ;;
 esac

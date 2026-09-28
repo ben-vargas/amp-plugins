@@ -24,7 +24,8 @@ repository copies are generated.
 | `enable` | Build if needed; write `config.yaml`; join the tailnet; `tailscale funnel --bg 8317`; `amp orb services ensure`; restart the service if the API key changed; create the host marker. |
 | `resume` | Only with the host marker: start `tailscaled`, rejoin if not `Running`, re-apply Funnel. |
 | `status` | Source commit, marker, Tailscale state, Funnel config, service state. |
-| `disable` | Remove the marker, reset Funnel, `tailscale logout` (deletes the ephemeral node, frees the name), disable `tailscaled`, stop the service. |
+| `disable` | Remove the marker, stop the service, then in a separate systemd unit reset Funnel, `tailscale logout` (deletes the ephemeral node, frees the name), and disable `tailscaled`. The unit survives the Tailscale SSH session it cuts. |
+| `reclaim` | Rename through `<hostname>-tmp` back to `<hostname>`, `tailscale funnel reset`, re-apply Funnel. For a node that joined as `<hostname>-1` after the old machine is removed. |
 
 `enable` and `resume` join with:
 
