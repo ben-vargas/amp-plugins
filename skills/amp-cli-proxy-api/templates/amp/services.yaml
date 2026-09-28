@@ -1,0 +1,9 @@
+services:
+  cliproxy:
+    command: exec .agents/cliproxy-host serve
+    port: 8317
+    health: /healthz
+    review: false
+    portal:
+      title: CLIProxyAPI
+      description: Model-routing proxy. API routes need the CLIPROXY_API_KEY bearer token.

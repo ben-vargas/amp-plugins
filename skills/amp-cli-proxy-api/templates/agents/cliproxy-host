@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# Runs CLIProxyAPI in this orb as an always-on model-routing host, reachable
+# through Tailscale Funnel at https://<CLIPROXY_TS_HOSTNAME>.<tailnet>.ts.net and
+# over Tailscale SSH.
+#
+# Installed by the amp-cli-proxy-api skill (scripts/scaffold.sh); edit the skill
+# template, not this copy.
+#
+#   fetch    check out CLIPROXY_REF of CLIPROXY_REPO into src/
+#   build    fetch, then build bin/cli-proxy-api
+#   update   build, then restart the running proxy
+#   serve    run the proxy in the foreground (the cliproxy service command)
+#   enable   write config.yaml, join the tailnet, turn on Funnel, start the proxy,
+#            and mark this orb as the host (the keep-alive plugin then holds it awake)
+#   resume   no-op unless enabled; otherwise rejoin the tailnet and re-apply Funnel
+#            (called by .agents/resume after every wake)
+#   status   show build, host, Tailscale, Funnel, and service state
+#   disable  leave the tailnet and stop keeping this orb awake
+#
+# Project settings: TS_CLIENT_ID and TS_AUDIENCE (Tailscale OIDC trust credential)
+# and the CLIPROXY_API_KEY secret. Optional: CLIPROXY_REPO, CLIPROXY_REF,
+# CLIPROXY_TS_HOSTNAME, CLIPROXY_TS_TAG.
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+CLIPROXY_REPO="${CLIPROXY_REPO:-https://github.com/router-for-me/CLIProxyAPI}"
+CLIPROXY_REF="${CLIPROXY_REF:-main}"
+TS_HOSTNAME="${CLIPROXY_TS_HOSTNAME:-amp-cli-proxy-api}"
+TS_TAG="${CLIPROXY_TS_TAG:-tag:amp-cli-proxy-api}"
+PROXY_PORT=8317
+# Also read by .amp/plugins/cliproxy-host-keepalive.ts.
+MARKER="$HOME/.config/cliproxy-host/enabled"
+CONFIG_CHANGED=0
+
+die() {
+	echo "cliproxy-host: $*" >&2
+	exit 1
+}
+
+require_env() {
+	local name
+	for name in "$@"; do
+		[[ -n "${!name:-}" ]] ||
+			die "$name is not set. Add it in the Amp project settings, then run: amp orb restart-processes"
+	done
+}
+
+cmd_fetch() {
+	if [[ ! -d src/.git ]]; then
+		git clone --quiet --depth 1 --branch "$CLIPROXY_REF" "$CLIPROXY_REPO" src
+	else
+		# Follow CLIPROXY_REPO changes in an existing checkout.
+		git -C src remote set-url origin "$CLIPROXY_REPO"
+		git -C src fetch --quiet --depth 1 origin "$CLIPROXY_REF"
+		git -C src reset --quiet --hard FETCH_HEAD
+	fi
+	echo "source: ${CLIPROXY_REPO}@${CLIPROXY_REF} ($(git -C src rev-parse --short HEAD))"
+}
+
+cmd_build() {
+	cmd_fetch
+	local commit
+	commit="$(git -C src rev-parse --short HEAD)"
+	(cd src && go build -buildvcs=false \
+		-ldflags "-X main.Version=${CLIPROXY_REF} -X main.Commit=${commit} -X main.BuildDate=$(date -u +%FT%TZ)" \
+		-o ../bin/cli-proxy-api.new ./cmd/server)
+	mv bin/cli-proxy-api.new bin/cli-proxy-api
+	echo "built bin/cli-proxy-api (${commit})"
+}
+
+cmd_update() {
+	cmd_build
+	amp orb service restart cliproxy
+}
+
+cmd_serve() {
+	[[ -x bin/cli-proxy-api ]] || die "bin/cli-proxy-api missing; run .agents/cliproxy-host build"
+	[[ -f config.yaml ]] || die "config.yaml missing; run .agents/cliproxy-host enable"
+	exec bin/cli-proxy-api --config config.yaml
+}
+
+# Writes the api-keys list in config.yaml from CLIPROXY_API_KEY, keeping other edits.
+# A new config.yaml starts from the fork's config.example.yaml with debug logging on.
+sync_config() {
+	if [[ -z "${CLIPROXY_API_KEY:-}" ]]; then
+		[[ -f config.yaml ]] && return
+		require_env CLIPROXY_API_KEY
+	fi
+	local source=config.yaml debug=0 tmp
+	if [[ ! -f config.yaml ]]; then
+		source=src/config.example.yaml
+		debug=1
+	fi
+	tmp="$(mktemp)"
+	# A JSON string literal is a valid YAML scalar, so jq handles all escaping.
+	KEY="$(jq -Rn --arg k "$CLIPROXY_API_KEY" '$k')" DEBUG="$debug" awk '
+		/^api-keys:/ { print; print "  - " ENVIRON["KEY"]; skip = 1; next }
+		skip && /^[[:space:]]+-/ { next }
+		ENVIRON["DEBUG"] == 1 && /^debug:/ { print "debug: true"; skip = 0; next }
+		{ skip = 0; print }
+	' "$source" >"$tmp"
+	if cmp -s "$tmp" config.yaml 2>/dev/null; then
+		rm -f "$tmp"
+	else
+		install -m 600 "$tmp" config.yaml
+		rm -f "$tmp"
+		echo "config.yaml api-keys set from CLIPROXY_API_KEY"
+		CONFIG_CHANGED=1
+	fi
+}
+
+ts_json() {
+	sudo tailscale status --json 2>/dev/null || echo '{}'
+}
+
+connect() {
+	sudo systemctl enable --now tailscaled >/dev/null 2>&1
+	local state
+	state="$(ts_json | jq -r '.BackendState // "Unknown"')"
+	if [[ "$state" != Running ]]; then
+		require_env TS_CLIENT_ID TS_AUDIENCE
+		echo "joining tailnet as $TS_HOSTNAME (was $state)"
+		local token
+		token="$(amp orb id-token --audience "$TS_AUDIENCE" --subject-scope project)"
+		sudo tailscale up --reset \
+			--client-id="${TS_CLIENT_ID}?ephemeral=true&preauthorized=true" \
+			--id-token="$token" \
+			--advertise-tags="$TS_TAG" \
+			--hostname="$TS_HOSTNAME" \
+			--accept-dns=false \
+			--ssh
+		unset token
+	fi
+	# Funnel prompts and waits when the tailnet policy does not allow it; fail instead.
+	timeout 30 sudo tailscale funnel --bg "$PROXY_PORT" >/dev/null ||
+		die "tailscale funnel failed; check the funnel nodeAttr for $TS_TAG in the tailnet policy"
+	local dns
+	dns="$(ts_json | jq -r '.Self.DNSName // ""')"
+	dns="${dns%.}"
+	echo "Custom URL base: https://$dns/v1"
+	[[ "$dns" == "$TS_HOSTNAME".* ]] ||
+		echo "warning: another machine still holds $TS_HOSTNAME. Remove it in the Tailscale admin console, then run: sudo tailscale set --hostname=$TS_HOSTNAME" >&2
+}
+
+cmd_enable() {
+	[[ -x bin/cli-proxy-api ]] || cmd_build
+	sync_config
+	connect
+	amp orb services ensure
+	# The running proxy does not pick up a changed api-keys list on its own.
+	if ((CONFIG_CHANGED)); then amp orb service restart cliproxy; fi
+	mkdir -p "$(dirname "$MARKER")"
+	touch "$MARKER"
+	echo "enabled: this orb is the CLIProxyAPI host and will be kept awake"
+	ls "$HOME"/.cli-proxy-api/claude-*.json >/dev/null 2>&1 ||
+		echo "next: log in to Claude with bin/cli-proxy-api --claude-login --no-browser (the callback URL prompt appears after about 15 seconds)"
+}
+
+cmd_resume() {
+	[[ -f "$MARKER" ]] || exit 0
+	connect
+}
+
+cmd_status() {
+	if [[ -d src/.git ]]; then
+		echo "source: ${CLIPROXY_REPO}@${CLIPROXY_REF} ($(git -C src rev-parse --short HEAD))"
+	fi
+	if [[ -f "$MARKER" ]]; then echo "host: enabled"; else echo "host: disabled"; fi
+	if systemctl is-active --quiet tailscaled; then
+		ts_json | jq -r '"tailscale: \(.BackendState) \(.Self.DNSName // "" | rtrimstr("."))"'
+		sudo tailscale funnel status 2>/dev/null || true
+	else
+		echo "tailscale: tailscaled not running"
+	fi
+	amp orb service status cliproxy 2>/dev/null | sed -n '1,3p' || true
+}
+
+cmd_disable() {
+	rm -f "$MARKER"
+	if systemctl is-active --quiet tailscaled; then
+		sudo tailscale funnel reset || true
+		# Logging out removes the ephemeral node now, freeing the hostname.
+		sudo tailscale logout || true
+	fi
+	sudo systemctl disable --now tailscaled >/dev/null 2>&1 || true
+	amp orb service stop cliproxy || true
+	echo "disabled: left the tailnet and stopped keeping this orb awake"
+}
+
+case "${1:-}" in
+fetch) cmd_fetch ;;
+build) cmd_build ;;
+update) cmd_update ;;
+serve) cmd_serve ;;
+enable) cmd_enable ;;
+resume) cmd_resume ;;
+status) cmd_status ;;
+disable) cmd_disable ;;
+*) die "usage: $0 fetch|build|update|serve|enable|resume|status|disable" ;;
+esac

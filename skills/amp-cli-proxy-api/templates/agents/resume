@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Runs after every orb activation and wake. Only the orb enabled as the
+# CLIProxyAPI host (.agents/cliproxy-host enable) does anything here.
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+exec .agents/cliproxy-host resume

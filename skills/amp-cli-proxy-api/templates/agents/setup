@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Prepares an Amp orb: Go toolchain, the CLIProxyAPI binary built from
+# CLIPROXY_REPO, the Claude Code CLI, and Tailscale (installed but left stopped).
+# Safe to run repeatedly. Installed by the amp-cli-proxy-api skill.
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+step() {
+	local name="$1"
+	shift
+	local start=$SECONDS
+	printf '==> %s\n' "$name"
+	"$@"
+	printf '    done in %ss\n' "$((SECONDS - start))"
+}
+
+install_go() {
+	# Track the source's go.mod minor version; pick the latest patch release for it.
+	local go_minor
+	go_minor="$(awk '/^go [0-9]/ { split($2, v, "."); print v[1] "." v[2]; exit }' src/go.mod)"
+	if [[ -x /usr/local/go/bin/go ]] &&
+		/usr/local/go/bin/go version | grep -Eq " go${go_minor//./\\.}(\.[0-9]+)? "; then
+		echo "    $(/usr/local/go/bin/go version) already installed"
+	else
+		local version
+		version="$(curl -fsSL 'https://go.dev/dl/?mode=json&include=all' |
+			jq -r --arg p "go${go_minor}." '[.[] | select(.stable and (.version | startswith($p)))][0].version')"
+		[[ -n "$version" && "$version" != "null" ]] || {
+			echo "no stable Go release found for go${go_minor}" >&2
+			return 1
+		}
+		echo "    installing ${version}"
+		local tmp
+		tmp="$(mktemp -d)"
+		curl -fsSL "https://go.dev/dl/${version}.linux-amd64.tar.gz" | tar -xz -C "$tmp"
+		sudo rm -rf /usr/local/go
+		sudo mv "$tmp/go" /usr/local/go
+		rmdir "$tmp"
+	fi
+	# Symlinks keep go on PATH for login, non-login, and supervised service shells.
+	sudo ln -sf /usr/local/go/bin/go /usr/local/bin/go
+	sudo ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+}
+
+install_claude_code() {
+	if command -v claude >/dev/null 2>&1; then
+		echo "    claude already installed"
+	else
+		npm install -g --no-fund --no-audit @anthropic-ai/claude-code
+	fi
+}
+
+install_tailscale() {
+	if command -v tailscale >/dev/null 2>&1; then
+		echo "    $(tailscale version | head -1) already installed"
+	else
+		local codename
+		codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+		curl -fsSL "https://pkgs.tailscale.com/stable/debian/${codename}.noarmor.gpg" |
+			sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+		curl -fsSL "https://pkgs.tailscale.com/stable/debian/${codename}.tailscale-keyring.list" |
+			sudo tee /etc/apt/sources.list.d/tailscale.list >/dev/null
+		sudo apt-get update -qq
+		sudo apt-get install -y -qq tailscale
+		# The package starts tailscaled; only the orb enabled as the proxy host
+		# (.agents/cliproxy-host enable) should run it, with its own machine state.
+		sudo systemctl disable --now tailscaled
+		sudo rm -f /var/lib/tailscale/tailscaled.state
+	fi
+	# E2B orbs expose only a link-local interface; without this, tailscaled
+	# treats the network as down and stays in NeedsLogin.
+	sudo install -d /etc/systemd/system/tailscaled.service.d
+	printf '[Service]\nEnvironment=TS_ASSUME_NETWORK_UP_FOR_TEST=true\n' |
+		sudo tee /etc/systemd/system/tailscaled.service.d/amp-orb.conf >/dev/null
+	sudo systemctl daemon-reload
+}
+
+# The source's go.mod decides the Go version, so fetch before installing Go.
+step "CLIProxyAPI source" .agents/cliproxy-host fetch
+step "Go toolchain" install_go
+step "Build bin/cli-proxy-api" .agents/cliproxy-host build
+step "Claude Code CLI" install_claude_code
+step "Tailscale (installed, not started)" install_tailscale

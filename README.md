@@ -13,6 +13,20 @@ Amp extends via TypeScript [plugins](https://ampcode.com/manual#plugins).
 
 Plugin entry points live under [`plugins/`](./plugins/).
 
+## Skills
+
+| Skill | Description |
+|-------|-------------|
+| [amp-cli-proxy-api](./skills/amp-cli-proxy-api/SKILL.md) | Sets up [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) in an always-on Amp orb, published through Tailscale Funnel, so Amp can route Claude models through your Claude subscription with a Custom URL model-routing connection. Walks you through the Amp project, Tailscale OIDC trust credential, Claude login, and model routing. |
+
+Install a skill globally, then ask Amp to use it (for example, "set up amp-cli-proxy-api"):
+
+```bash
+amp skill add --global ben-vargas/amp-plugins/skills/<name>
+```
+
+The `amp-cli-proxy-api` skill includes a keep-alive plugin as a template. Its `scripts/scaffold.sh` installs that plugin into the host project; do not install it with `amp plugins add`.
+
 ## Install
 
 Requires the [Amp CLI](https://ampcode.com/manual#get-started) (binary install; plugins need the native CLI).
@@ -60,6 +74,7 @@ Re-run `amp plugins add <url>` or replace the local file with the latest version
 ```text
 amp-plugins/
   plugins/     # plugin entry points
+  skills/      # agent skills (SKILL.md plus bundled files)
   README.md
 ```
 
