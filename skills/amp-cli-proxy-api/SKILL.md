@@ -61,7 +61,7 @@ Ask only when needed, and propose defaults.
 |---|---|---|
 | Amp project | new personal Amp-hosted project `amp-cli-proxy-api` | step 1 |
 | Orb size | `a1.small` | project setting `environment_resource` |
-| CLIProxyAPI source | `https://github.com/router-for-me/CLIProxyAPI`, `main` | env `CLIPROXY_REPO`, `CLIPROXY_REF` (only if different; must be publicly clonable) |
+| CLIProxyAPI source | `https://github.com/router-for-me/CLIProxyAPI`, `latest` (newest stable `vX.Y.Z` release tag) | env `CLIPROXY_REPO`, `CLIPROXY_REF` (only if different; must be publicly clonable; a branch name builds its tip) |
 | Tailscale hostname | `amp-cli-proxy-api` | env `CLIPROXY_TS_HOSTNAME` (only if different) |
 | Tailscale tag | `tag:amp-cli-proxy-api` | env `CLIPROXY_TS_TAG` (only if different) |
 | Skill source | `https://github.com/ben-vargas/amp-plugins`, `main` (path `skills/amp-cli-proxy-api`) | env `CLIPROXY_SKILL_REPO`, `CLIPROXY_SKILL_REF` (only for a fork of the skill) |

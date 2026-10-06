@@ -6,7 +6,8 @@
 # Installed by the amp-cli-proxy-api skill (scripts/scaffold.sh); edit the skill
 # template, not this copy.
 #
-#   fetch    check out CLIPROXY_REF of CLIPROXY_REPO into src/
+#   fetch    check out CLIPROXY_REF of CLIPROXY_REPO into src/ (the default, latest,
+#            means the newest stable vX.Y.Z release tag, never a branch tip)
 #   build    fetch, then build bin/cli-proxy-api
 #   update   build, then restart the running proxy
 #   serve    run the proxy in the foreground (the cliproxy service command)
@@ -30,7 +31,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 CLIPROXY_REPO="${CLIPROXY_REPO:-https://github.com/router-for-me/CLIProxyAPI}"
-CLIPROXY_REF="${CLIPROXY_REF:-main}"
+CLIPROXY_REF="${CLIPROXY_REF:-latest}"
 TS_HOSTNAME="${CLIPROXY_TS_HOSTNAME:-amp-cli-proxy-api}"
 TS_TAG="${CLIPROXY_TS_TAG:-tag:amp-cli-proxy-api}"
 CLIPROXY_SKILL_REPO="${CLIPROXY_SKILL_REPO:-https://github.com/ben-vargas/amp-plugins}"
@@ -55,16 +56,33 @@ require_env() {
 	done
 }
 
+# Prints the ref to build. "latest" is the highest stable vX.Y.Z tag; tags with a
+# suffix such as v1.2.3-rc1 or v1.2.3-0 are not stable and are skipped.
+resolve_ref() {
+	if [[ "$CLIPROXY_REF" != latest ]]; then
+		echo "$CLIPROXY_REF"
+		return
+	fi
+	local tag
+	tag="$(git ls-remote --tags --refs "$CLIPROXY_REPO" |
+		awk '{ sub("refs/tags/", "", $2); print $2 }' |
+		grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)"
+	[[ -n "$tag" ]] ||
+		die "no stable vX.Y.Z tag in $CLIPROXY_REPO; set CLIPROXY_REF to a branch or tag"
+	echo "$tag"
+}
+
 cmd_fetch() {
+	SOURCE_REF="$(resolve_ref)"
 	if [[ ! -d src/.git ]]; then
-		git clone --quiet --depth 1 --branch "$CLIPROXY_REF" "$CLIPROXY_REPO" src
+		git clone --quiet --depth 1 --branch "$SOURCE_REF" "$CLIPROXY_REPO" src
 	else
 		# Follow CLIPROXY_REPO changes in an existing checkout.
 		git -C src remote set-url origin "$CLIPROXY_REPO"
-		git -C src fetch --quiet --depth 1 origin "$CLIPROXY_REF"
+		git -C src fetch --quiet --depth 1 origin "$SOURCE_REF"
 		git -C src reset --quiet --hard FETCH_HEAD
 	fi
-	echo "source: ${CLIPROXY_REPO}@${CLIPROXY_REF} ($(git -C src rev-parse --short HEAD))"
+	echo "source: ${CLIPROXY_REPO}@${SOURCE_REF} ($(git -C src rev-parse --short HEAD))"
 }
 
 cmd_build() {
@@ -72,7 +90,7 @@ cmd_build() {
 	local commit
 	commit="$(git -C src rev-parse --short HEAD)"
 	(cd src && go build -buildvcs=false \
-		-ldflags "-X main.Version=${CLIPROXY_REF} -X main.Commit=${commit} -X main.BuildDate=$(date -u +%FT%TZ)" \
+		-ldflags "-X main.Version=${SOURCE_REF} -X main.Commit=${commit} -X main.BuildDate=$(date -u +%FT%TZ)" \
 		-o ../bin/cli-proxy-api.new ./cmd/server)
 	mv bin/cli-proxy-api.new bin/cli-proxy-api
 	echo "built bin/cli-proxy-api (${commit})"
@@ -121,11 +139,24 @@ sync_config() {
 	fi
 	tmp="$(mktemp)"
 	# A JSON string literal is a valid YAML scalar, so jq handles all escaping.
+	# Handles both layouts: legacy top-level api-keys and debug, and v8 access.api-keys
+	# and observability.logs.debug. Other api-keys lists (upstream providers) are left alone.
 	KEY="$(jq -Rn --arg k "$CLIPROXY_API_KEY" '$k')" DEBUG="$debug" awk '
-		/^api-keys:/ { print; print "  - " ENVIRON["KEY"]; skip = 1; next }
-		skip && /^[[:space:]]+-/ { next }
-		ENVIRON["DEBUG"] == 1 && /^debug:/ { print "debug: true"; skip = 0; next }
-		{ skip = 0; print }
+		BEGIN { skip = -1 }
+		/^[A-Za-z]/ { top = $0; sub(/:.*/, "", top); second = "" }
+		/^  [A-Za-z]/ { second = $0; sub(/^  /, "", second); sub(/:.*/, "", second) }
+		/^api-keys:/ || (top == "access" && /^  api-keys:/) {
+			indent = $0; sub(/api-keys:.*/, "", indent)
+			print indent "api-keys:"; print indent "  - " ENVIRON["KEY"]
+			skip = length(indent); next
+		}
+		skip >= 0 && /^[[:space:]]*(#|$)/ { print; next }
+		skip >= 0 && /^[[:space:]]*-/ { lead = $0; sub(/-.*/, "", lead); if (length(lead) >= skip) next }
+		ENVIRON["DEBUG"] == 1 && (/^debug:/ || (top == "observability" && second == "logs" && /^    debug:/)) {
+			indent = $0; sub(/debug:.*/, "", indent)
+			print indent "debug: true"; skip = -1; next
+		}
+		{ skip = -1; print }
 	' "$source" >"$tmp"
 	if cmp -s "$tmp" config.yaml 2>/dev/null; then
 		rm -f "$tmp"
@@ -184,15 +215,32 @@ cmd_enable() {
 		echo "next: log in to Claude with bin/cli-proxy-api --claude-login --no-browser (the callback URL prompt appears after about 15 seconds)"
 }
 
+# Waits up to 30 seconds for tailscaled to leave its startup states.
+wait_for_backend() {
+	local i
+	for i in $(seq 1 15); do
+		case "$(ts_json | jq -r '.BackendState // ""')" in
+		Running | NeedsLogin | NeedsMachineAuth | Stopped) return 0 ;;
+		esac
+		sleep 2
+	done
+}
+
 cmd_resume() {
 	[[ -f "$MARKER" ]] || exit 0
+	# After a pause, tailscaled can keep reporting Running while its connections are
+	# dead, so Funnel traffic stops arriving. A restart re-establishes them and keeps
+	# the node identity; connect then rejoins only if the node is really logged out.
+	sudo systemctl restart tailscaled
+	wait_for_backend
 	connect
 }
 
 cmd_status() {
 	if [[ -d src/.git ]]; then
-		echo "source: ${CLIPROXY_REPO}@${CLIPROXY_REF} ($(git -C src rev-parse --short HEAD))"
+		echo "source: ${CLIPROXY_REPO}@${CLIPROXY_REF} (checked out $(git -C src rev-parse --short HEAD))"
 	fi
+	[[ -x bin/cli-proxy-api ]] && echo "binary: $(bin/cli-proxy-api --help 2>&1 | head -n 1)"
 	if [[ -f "$MARKER" ]]; then echo "host: enabled"; else echo "host: disabled"; fi
 	if systemctl is-active --quiet tailscaled; then
 		ts_json | jq -r '"tailscale: \(.BackendState) \(.Self.DNSName // "" | rtrimstr("."))"'

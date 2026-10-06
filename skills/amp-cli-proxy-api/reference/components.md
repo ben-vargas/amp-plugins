@@ -21,12 +21,12 @@ fetch them. To pick up template changes in a host project: `.agents/cliproxy-hos
 
 | Command | Effect |
 |---|---|
-| `fetch` | Shallow clone or hard reset of `src/` to `CLIPROXY_REF` of `CLIPROXY_REPO`. |
-| `build` | `fetch`, then `go build` to `bin/cli-proxy-api` with version, commit, and build date. |
+| `fetch` | Shallow clone or hard reset of `src/` to `CLIPROXY_REF` of `CLIPROXY_REPO`. `latest` resolves to the highest stable `vX.Y.Z` tag (`git ls-remote`; suffixed tags such as `-rc1` are skipped). |
+| `build` | `fetch`, then `go build` to `bin/cli-proxy-api` with the resolved tag or ref as version, commit, and build date. |
 | `update` | `build`, then restart the `cliproxy` service. |
 | `serve` | `exec bin/cli-proxy-api --config config.yaml` (service command). |
 | `enable` | Build if needed; write `config.yaml`; join the tailnet; `tailscale funnel --bg 8317`; `amp orb services ensure`; restart the service if the API key changed; create the host marker. |
-| `resume` | Only with the host marker: start `tailscaled`, rejoin if not `Running`, re-apply Funnel. |
+| `resume` | Only with the host marker: restart `tailscaled` (after a pause it can report `Running` with dead connections, so Funnel traffic stops), wait for it to settle, rejoin if not `Running`, re-apply Funnel. |
 | `status` | Source commit, marker, Tailscale state, Funnel config, service state. |
 | `disable` | Remove the marker, stop the service, then in a separate systemd unit reset Funnel, `tailscale logout` (deletes the ephemeral node, frees the name), and disable `tailscaled`. The unit survives the Tailscale SSH session it cuts. |
 | `reclaim` | Rename through `<hostname>-tmp` back to `<hostname>`, `tailscale funnel reset`, re-apply Funnel. For a node that joined as `<hostname>-1` after the old machine is removed. |
@@ -51,7 +51,7 @@ rejoins after a wake.
 | `TS_CLIENT_ID` | env | yes | Trust credential client ID. |
 | `TS_AUDIENCE` | env | yes | Trust credential audience. |
 | `CLIPROXY_REPO` | env | no | Source repository (default upstream CLIProxyAPI). Must clone without credentials. |
-| `CLIPROXY_REF` | env | no | Branch or tag (default `main`). |
+| `CLIPROXY_REF` | env | no | `latest` (default: newest stable `vX.Y.Z` tag), or a tag or branch. A branch builds its tip. |
 | `CLIPROXY_TS_HOSTNAME` | env | no | Tailscale hostname (default `amp-cli-proxy-api`). |
 | `CLIPROXY_TS_TAG` | env | no | Tailscale tag (default `tag:amp-cli-proxy-api`). |
 | `CLIPROXY_SKILL_REPO` | env | no | Repository holding the published skill at `skills/amp-cli-proxy-api` (default `https://github.com/ben-vargas/amp-plugins`). Must clone without credentials. |
