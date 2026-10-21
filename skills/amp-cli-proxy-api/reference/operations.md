@@ -4,7 +4,10 @@ Run in the host orb from the repository root (`~/workspace/repo`).
 
 | Task | Command |
 |---|---|
-| Status | `.agents/cliproxy-host status` |
+| Status (proxy, lease, watchdog, pauses, Tailscale) | `.agents/cliproxy-host status` |
+| Pauses with their sources | `.agents/cliproxy-host pauses [days]` |
+| Lease, resume, and repair history | `tail -n 50 ~/.config/cliproxy-host/events.log` |
+| Watchdog logs | `amp orb service logs cliproxy-watchdog -n 50` |
 | Deploy the newest release (or the pinned `CLIPROXY_REF`) | `.agents/cliproxy-host update` |
 | Refresh the skill from its published source | `.agents/cliproxy-host skill` |
 | Apply new skill templates to the host files | `.agents/cliproxy-host skill`, then `bash .agents/skills/amp-cli-proxy-api/scripts/scaffold.sh --force .`, then commit and push |

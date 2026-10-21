@@ -13,9 +13,14 @@
 #   serve    run the proxy in the foreground (the cliproxy service command)
 #   enable   write config.yaml, join the tailnet, turn on Funnel, start the proxy,
 #            and mark this orb as the host (the keep-alive plugin then holds it awake)
-#   resume   no-op unless enabled; otherwise rejoin the tailnet and re-apply Funnel
-#            (called by .agents/resume after every wake)
-#   status   show build, host, Tailscale, Funnel, and service state
+#   resume   no-op unless enabled; otherwise make sure tailscaled and the watchdog run
+#            and repair public access only if it is broken (called by .agents/resume
+#            after every wake and after some executor reconnects)
+#   status   show build, host, lease, watchdog, pause, Tailscale, Funnel, and service state
+#   watchdog check the public endpoint every 2 minutes and repair Tailscale after two
+#            failures in a row while the local proxy is healthy (supervised service)
+#   pauses   list orb pauses from the kernel heartbeat, the Amp executor log, and the
+#            watchdog (default: last 7 days; pass a number of days)
 #   disable  leave the tailnet and stop keeping this orb awake (safe to run over
 #            Tailscale SSH; the teardown finishes even though the session drops)
 #   reclaim  take back the exact hostname after the node joined as <hostname>-1
@@ -39,8 +44,15 @@ CLIPROXY_SKILL_REF="${CLIPROXY_SKILL_REF:-main}"
 SKILL_SRC=skills/amp-cli-proxy-api
 SKILL_DIR=.agents/skills/amp-cli-proxy-api
 PROXY_PORT=8317
-# Also read by .amp/plugins/cliproxy-host-keepalive.ts.
-MARKER="$HOME/.config/cliproxy-host/enabled"
+# Shared with .amp/plugins/cliproxy-host-keepalive.ts, which holds the keep-alive lease
+# while the marker exists and writes keepalive.json and events.log here.
+STATE_DIR="$HOME/.config/cliproxy-host"
+MARKER="$STATE_DIR/enabled"
+EVENTS="$STATE_DIR/events.log"
+WATCHDOG_SERVICE=cliproxy-watchdog
+WATCHDOG_INTERVAL="${CLIPROXY_WATCHDOG_INTERVAL:-120}"
+WD_FAILURES=0
+WD_LAST_RECOVERY=0
 CONFIG_CHANGED=0
 
 die() {
@@ -169,11 +181,93 @@ sync_config() {
 }
 
 ts_json() {
-	sudo tailscale status --json 2>/dev/null || echo '{}'
+	# A wedged tailscaled can stop answering; never let that hang resume or the watchdog.
+	timeout 10 sudo tailscale status --json 2>/dev/null || echo '{}'
+}
+
+# Appends one JSON line to events.log: event <type> [key=value ...].
+event() {
+	local type="$1" kv args=()
+	shift
+	for kv in "$@"; do args+=(--arg "${kv%%=*}" "${kv#*=}"); done
+	mkdir -p "$STATE_DIR"
+	jq -cn --arg t "$(date -u +%FT%TZ)" --arg type "$type" --arg src "${EVENT_SOURCE:-cli}" \
+		"${args[@]}" '$ARGS.named' >>"$EVENTS" 2>/dev/null || true
+}
+
+local_ok() {
+	[[ "$(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PROXY_PORT/healthz")" == 200 ]]
+}
+
+# public_ok <timeout>: requests https://<this node>/healthz through public DNS and the
+# Funnel relays, the same path Amp uses. The name resolves to more than one relay, and
+# after a restart one can work before the other, so every relay must answer.
+public_ok() {
+	local dns ips ip
+	dns="$(ts_json | jq -r '.Self.DNSName // ""')"
+	dns="${dns%.}"
+	[[ -n "$dns" ]] || return 1
+	ips="$(getent ahostsv4 "$dns" | awk '{ print $1 }' | sort -u)"
+	[[ -n "$ips" ]] || return 1
+	for ip in $ips; do
+		[[ "$(curl -s -m "$1" --resolve "$dns:443:$ip" -o /dev/null -w '%{http_code}' \
+			"https://$dns/healthz")" == 200 ]] || return 1
+	done
+}
+
+# wait_for_public <tries> <timeout>: retries public_ok 3 seconds apart.
+wait_for_public() {
+	local i
+	for ((i = 1; i <= $1; i++)); do
+		public_ok "$2" && return 0
+		if ((i < $1)); then sleep 3; fi
+	done
+	return 1
+}
+
+# Repairs public access. If tailscaled answers but Funnel is off, turning Funnel back on
+# is enough. Otherwise restart tailscaled: after a pause it can report Running while its
+# connections are dead. The lock keeps resume and the watchdog from repairing at once.
+recover_public() {
+	local reason="$1"
+	mkdir -p "$STATE_DIR"
+	(
+		if ! flock -n 9; then
+			# Another repair is running; wait for it, then repair only if it did not work.
+			echo "waiting for the public access repair that is already running"
+			flock -w 300 9 || exit 1
+			public_ok 10 && exit 0
+		fi
+		local serve
+		serve="$(timeout 10 sudo tailscale funnel status --json 2>/dev/null)" || serve=""
+		if [[ -n "$serve" ]] && ! jq -e '.AllowFunnel // {} | any' <<<"$serve" >/dev/null; then
+			(connect) >/dev/null 2>&1 || true
+			if wait_for_public 3 10; then
+				event recovered action=funnel reason="$reason"
+				echo "public access restored by turning Funnel back on"
+				exit 0
+			fi
+		fi
+		event tailscaled_restart reason="$reason"
+		sudo systemctl restart tailscaled
+		wait_for_backend
+		(connect) || true
+		if wait_for_public 6 10; then
+			event recovered action=restart reason="$reason"
+			echo "public access restored by restarting tailscaled"
+			exit 0
+		fi
+		event recovery_failed reason="$reason"
+		echo "public access still failing after restarting tailscaled" >&2
+		exit 1
+	) 9>"$STATE_DIR/recover.lock"
 }
 
 connect() {
 	sudo systemctl enable --now tailscaled >/dev/null 2>&1
+	# A tailscaled that just started reports NoState or Starting for a few seconds even
+	# when it is still logged in; joining again then would be wrong.
+	wait_for_backend
 	local state
 	state="$(ts_json | jq -r '.BackendState // "Unknown"')"
 	if [[ "$state" != Running ]]; then
@@ -208,8 +302,10 @@ cmd_enable() {
 	amp orb services ensure
 	# The running proxy does not pick up a changed api-keys list on its own.
 	if ((CONFIG_CHANGED)); then amp orb service restart cliproxy; fi
-	mkdir -p "$(dirname "$MARKER")"
+	mkdir -p "$STATE_DIR"
 	touch "$MARKER"
+	event enabled
+	ensure_watchdog
 	echo "enabled: this orb is the CLIProxyAPI host and will be kept awake"
 	ls "$HOME"/.cli-proxy-api/claude-*.json >/dev/null 2>&1 ||
 		echo "next: log in to Claude with bin/cli-proxy-api --claude-login --no-browser (the callback URL prompt appears after about 15 seconds)"
@@ -226,14 +322,240 @@ wait_for_backend() {
 	done
 }
 
+# The watchdog is an ad-hoc supervised service, not part of .amp/services.yaml: only the
+# host orb runs it, and it has no port for the readiness check of services ensure.
+# Amp names the systemd unit of a service amp-svc-<name>.
+ensure_watchdog() {
+	systemctl is-active --quiet "amp-svc-$WATCHDOG_SERVICE" && return 0
+	amp orb service start "$WATCHDOG_SERVICE" --cwd "$PWD" \
+		--command 'exec .agents/cliproxy-host watchdog' >/dev/null
+	echo "watchdog: started"
+}
+
 cmd_resume() {
 	[[ -f "$MARKER" ]] || exit 0
-	# After a pause, tailscaled can keep reporting Running while its connections are
-	# dead, so Funnel traffic stops arriving. A restart re-establishes them and keeps
-	# the node identity; connect then rejoins only if the node is really logged out.
-	sudo systemctl restart tailscaled
-	wait_for_backend
-	connect
+	EVENT_SOURCE=resume
+	ensure_watchdog || echo "warning: could not start the watchdog" >&2
+	if ! systemctl is-active --quiet tailscaled ||
+		[[ "$(ts_json | jq -r '.BackendState // ""')" != Running ]]; then
+		event resume result=connect
+		connect
+	fi
+	# Amp also runs resume when the executor only reconnected. Restarting a working
+	# tailscaled then cuts public traffic for nothing, so check first.
+	if wait_for_public 2 6; then
+		event resume result=healthy
+		echo "public endpoint healthy; tailscaled left running"
+		return
+	fi
+	if ! local_ok; then
+		event resume result=local_down
+		echo "warning: the proxy does not answer locally; not touching Tailscale" >&2
+		return
+	fi
+	event resume result=repair
+	recover_public resume
+}
+
+# One watchdog check. Two public failures in a row while the local proxy is healthy
+# trigger a repair, at most once every 10 minutes.
+watchdog_check() {
+	local now local_state public_state
+	now="$(date +%s)"
+	if [[ ! -f "$MARKER" ]]; then
+		WD_FAILURES=0
+		write_watchdog_state "$now" skipped skipped
+		return
+	fi
+	if ! local_ok; then
+		# The proxy itself is down and its supervisor restarts it; Tailscale is not the cause.
+		local_state=fail public_state=skipped WD_FAILURES=0
+	elif public_ok 15; then
+		local_state=ok public_state=ok WD_FAILURES=0
+	else
+		local_state=ok public_state=fail WD_FAILURES=$((WD_FAILURES + 1))
+		echo "watchdog: public check failed while the local proxy is healthy ($WD_FAILURES in a row)"
+		if ((WD_FAILURES >= 2 && now - WD_LAST_RECOVERY >= 600)); then
+			event public_down failures="$WD_FAILURES"
+			if recover_public watchdog; then public_state=repaired; else public_state=repair_failed; fi
+			WD_LAST_RECOVERY="$(date +%s)"
+			WD_FAILURES=0
+		fi
+	fi
+	write_watchdog_state "$now" "$local_state" "$public_state"
+}
+
+# write_watchdog_state <checked-epoch> <local> <public>
+write_watchdog_state() {
+	jq -n --argjson checked "$1" --arg local "$2" --arg public "$3" \
+		--argjson failures "$WD_FAILURES" --argjson repaired "$WD_LAST_RECOVERY" \
+		--argjson interval "$WATCHDOG_INTERVAL" --argjson pid "$$" '{
+			checkedAt: ($checked | todate), local: $local, public: $public,
+			consecutivePublicFailures: $failures,
+			lastRepairAt: (if $repaired > 0 then ($repaired | todate) else null end),
+			intervalSeconds: $interval, pid: $pid}' >"$STATE_DIR/watchdog.json.tmp" &&
+		mv "$STATE_DIR/watchdog.json.tmp" "$STATE_DIR/watchdog.json" || true
+}
+
+# Keeps events.log under about 1 MB.
+trim_events() {
+	if [[ -f "$EVENTS" ]] && (($(stat -c %s "$EVENTS") > 1048576)); then
+		tail -n 2000 "$EVENTS" >"$EVENTS.tmp" && mv "$EVENTS.tmp" "$EVENTS"
+	fi
+}
+
+cmd_watchdog() {
+	EVENT_SOURCE=watchdog
+	mkdir -p "$STATE_DIR"
+	echo "watchdog: checking every ${WATCHDOG_INTERVAL}s"
+	local last now
+	last="$(date +%s)"
+	while sleep "$WATCHDOG_INTERVAL"; do
+		now="$(date +%s)"
+		# A check that runs far later than scheduled means the orb was paused in between.
+		if ((now - last > WATCHDOG_INTERVAL + 180)); then
+			event pause start="$last" end="$now"
+			echo "watchdog: $((now - last))s since the last check; the orb was paused"
+		fi
+		watchdog_check
+		trim_events
+		last="$(date +%s)"
+	done
+}
+
+# Reads "<start> <end> <source>" gaps on stdin (epoch seconds, sorted by start), merges
+# overlapping ones, and prints "<start> <end> <kind> <sources>". Bounds come from the most
+# precise source (kernel, then executor, then watchdog). Kinds: pause (the kernel heartbeat
+# stopped too), unconfirmed (no kernel heartbeat for that time), process-gap (the kernel
+# kept running, so only a process stopped, such as the Amp CLI during an update).
+# Argument: epoch of the first kernel heartbeat, or 0 if there is none.
+classify_gaps() {
+	awk -v kstart="$1" '
+		function rank(s) { return s == "kernel" ? 3 : s == "executor" ? 2 : 1 }
+		function flush() {
+			if (!n) return
+			kind = srcs ~ /kernel/ ? "pause" : (kstart == 0 || gs < kstart) ? "unconfirmed" : "process-gap"
+			print bs, be, kind, srcs
+		}
+		{
+			if (n && $1 <= ge) {
+				if ($2 > ge) ge = $2
+				if (index(srcs, $3) == 0) srcs = srcs "," $3
+				if (rank($3) > br) { br = rank($3); bs = $1; be = $2 }
+				next
+			}
+			flush(); n = 1; gs = $1; ge = $2; srcs = $3; br = rank($3); bs = $1; be = $2
+		}
+		END { flush() }'
+}
+
+# pause_gaps <since-epoch>: prints raw "<start> <end> <source>" gaps from the signals
+# that run all the time on the host:
+#   kernel    E2B guests log "clock pairing hypercall" every 4 seconds (gap > 60 s)
+#   executor  the Amp CLI log, which gets a keep-alive renewal at least every 4 minutes
+#             (gap > 6 min)
+#   watchdog  pause events the watchdog recorded (it survives journal and log rotation)
+pause_gaps() {
+	local f files=()
+	for f in "$HOME"/.cache/amp/logs/headless.log.{9,8,7,6,5,4,3,2,1} "$HOME"/.cache/amp/logs/headless.log; do
+		if [[ -f "$f" ]]; then files+=("$f"); fi
+	done
+	sudo journalctl -k --since "@$1" --no-pager -o short-unix 2>/dev/null |
+		awk '/clock pairing/ { t = int($1); if (p && t - p > 60) print p, t, "kernel"; p = t }' || true
+	if ((${#files[@]})); then
+		grep -ah -o '^{"@timestamp":"[^"]*"' "${files[@]}" | TZ=UTC awk -F'"' -v since="$1" '{
+			s = substr($4, 1, 19); gsub(/[-T:]/, " ", s); t = mktime(s)
+			if (t < since) next
+			if (p && t - p > 360) print p, t, "executor"
+			p = t }' || true
+	fi
+	if [[ -f "$EVENTS" ]]; then
+		jq -r --argjson since "$1" 'select(.type == "pause" and (.end | tonumber) >= $since) |
+			"\(.start) \(.end) watchdog"' "$EVENTS" 2>/dev/null || true
+	fi
+}
+
+first_kernel_heartbeat() {
+	sudo journalctl -k --since "@$1" --no-pager -o short-unix 2>/dev/null |
+		awk '/clock pairing/ { print int($1); exit }' || true
+}
+
+pause_list() {
+	pause_gaps "$1" | sort -n -k1,1 | classify_gaps "$(first_kernel_heartbeat "$1" | grep . || echo 0)"
+}
+
+fmt_time() { date -u -d "@$1" '+%m-%d %H:%M:%S'; }
+
+fmt_duration() {
+	if (($1 >= 3600)); then printf '%dh%02dm' $(($1 / 3600)) $(($1 % 3600 / 60)); else printf '%dm%02ds' $(($1 / 60)) $(($1 % 60)); fi
+}
+
+cmd_pauses() {
+	local days="${1:-7}" now since kstart start end kind srcs n=0
+	now="$(date +%s)"
+	since=$((now - days * 86400))
+	kstart="$(first_kernel_heartbeat "$since")"
+	echo "orb pauses in the last $days days (UTC):"
+	if [[ -n "$kstart" ]]; then
+		echo "  kernel heartbeat available since $(fmt_time "$kstart")"
+	else
+		echo "  no kernel heartbeat in the journal"
+	fi
+	while read -r start end kind srcs; do
+		n=$((n + 1))
+		echo "  $(fmt_time "$start") -> $(fmt_time "$end")  $(fmt_duration $((end - start)))  $kind ($srcs)"
+	done < <(pause_list "$since")
+	((n)) || echo "  none"
+	echo "kinds: pause = the VM stopped; unconfirmed = no kernel heartbeat for that time;"
+	echo "       process-gap = the VM kept running and only the Amp CLI or watchdog stopped"
+}
+
+status_lease() {
+	local f="$STATE_DIR/keepalive.json" enabled=0
+	[[ -f "$MARKER" ]] && enabled=1
+	if [[ ! -f "$f" ]]; then
+		echo "lease: no plugin state yet ($f)"
+		return
+	fi
+	jq -r --argjson now "$(date +%s)" --argjson enabled "$enabled" '
+		def secs: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+		def ago: if . == null then "never" else "\($now - secs)s ago" end;
+		"lease: \(if .holding then "held" else "not held" end); last successful renewal \(.lastSuccessAt | ago); \(.consecutiveFailures) failures in a row (\(.renewals) renewals, \(.failures) failures since the plugin started \(.startedAt | ago))"
+		+ (if .lastError then "\n  last error: \(.lastError[0:200])" else "" end)
+		+ (if $enabled == 1 and (.lastSuccessAt == null or ($now - (.lastSuccessAt | secs)) > 180)
+			then "\n  warning: no successful renewal in the last 3 minutes" else "" end)' "$f"
+}
+
+status_watchdog() {
+	local f="$STATE_DIR/watchdog.json" svc=stopped
+	systemctl is-active --quiet "amp-svc-$WATCHDOG_SERVICE" && svc=running
+	if [[ -f "$f" ]]; then
+		jq -r --arg svc "$svc" --argjson now "$(date +%s)" '"watchdog: \($svc); last check \($now - (.checkedAt | fromdateiso8601))s ago: local \(.local), public \(.public), \(.consecutivePublicFailures) public failures in a row; last repair \(.lastRepairAt // "never")"' "$f"
+	else
+		echo "watchdog: $svc; no checks yet"
+	fi
+	if [[ -f "$EVENTS" ]]; then
+		jq -r 'select(.type == "resume") | "last resume: \(.t) \(.result)"' "$EVENTS" 2>/dev/null | tail -n 1
+	fi
+}
+
+status_pauses() {
+	local now start end kind srcs day=0 week=0 unconfirmed=0 last=""
+	now="$(date +%s)"
+	while read -r start end kind srcs; do
+		case "$kind" in
+		pause)
+			week=$((week + 1))
+			if ((end >= now - 86400)); then day=$((day + 1)); fi
+			last="$(fmt_time "$start") -> $(fmt_time "$end") UTC ($(fmt_duration $((end - start))))"
+			;;
+		unconfirmed) unconfirmed=$((unconfirmed + 1)) ;;
+		esac
+	done < <(pause_list $((now - 7 * 86400)))
+	echo "pauses: $day in the last 24 h, $week in the last 7 days; last: ${last:-none}"
+	if ((unconfirmed)); then
+		echo "  plus $unconfirmed unconfirmed gaps from before the kernel log starts (.agents/cliproxy-host pauses)"
+	fi
 }
 
 cmd_status() {
@@ -242,6 +564,9 @@ cmd_status() {
 	fi
 	[[ -x bin/cli-proxy-api ]] && echo "binary: $(bin/cli-proxy-api --help 2>&1 | head -n 1)"
 	if [[ -f "$MARKER" ]]; then echo "host: enabled"; else echo "host: disabled"; fi
+	status_lease
+	status_watchdog
+	status_pauses
 	if systemctl is-active --quiet tailscaled; then
 		ts_json | jq -r '"tailscale: \(.BackendState) \(.Self.DNSName // "" | rtrimstr("."))"'
 		sudo tailscale funnel status 2>/dev/null || true
@@ -253,7 +578,9 @@ cmd_status() {
 
 cmd_disable() {
 	rm -f "$MARKER"
+	event disabled
 	amp orb service stop cliproxy || true
+	amp orb service stop "$WATCHDOG_SERVICE" >/dev/null 2>&1 || true
 	# Leaving the tailnet cuts any Tailscale SSH session running this command, and the
 	# hangup would kill a teardown that runs here before the logout reaches Tailscale.
 	# A separate systemd unit keeps going when this session drops. Logging out
@@ -305,5 +632,7 @@ status) cmd_status ;;
 disable) cmd_disable ;;
 reclaim) cmd_reclaim ;;
 skill) cmd_skill ;;
-*) die "usage: $0 fetch|build|update|serve|enable|resume|status|disable|reclaim|skill" ;;
+watchdog) cmd_watchdog ;;
+pauses) cmd_pauses "${2:-7}" ;;
+*) die "usage: $0 fetch|build|update|serve|enable|resume|status|disable|reclaim|skill|watchdog|pauses" ;;
 esac

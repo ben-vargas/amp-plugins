@@ -21,7 +21,10 @@ Why it is built this way (do not redesign without a reason):
 - Tailscale Funnel gives a stable name, real TLS, and streaming. Cloudflare Quick Tunnels do
   not support SSE and change URL on every run.
 - Orbs pause when idle and a running service does not keep one awake. A bundled Amp plugin holds
-  a keep-alive lease, but only on the one orb marked as the host.
+  a keep-alive lease, renewed every minute, but only on the one orb marked as the host.
+- After a pause `tailscaled` can stay `Running` with dead connections. `resume` and a watchdog
+  service check the public endpoint and repair Tailscale only when it is actually broken, so
+  executor reconnects (which also run `resume`) do not interrupt traffic.
 - The orb joins the tailnet with Amp workload identity (OIDC), so no Tailscale key is stored.
 - Every orb of the project installs Tailscale, but only the host orb starts it.
 
@@ -217,8 +220,10 @@ request with its model (debug logging is on by default).
 ### 9. Hand over
 
 Tell the user, briefly: the base URL, how to SSH (`ssh user@<hostname>` from a tailnet device,
-if the SSH rule was added), where logs are, how to update (`.agents/cliproxy-host update`), the
-cost, and that archiving the host thread takes the proxy offline. Point to
+if the SSH rule was added), where logs are, how to check health (`.agents/cliproxy-host status`
+shows the proxy, keep-alive lease, watchdog, pauses, and Funnel), how to update
+(`.agents/cliproxy-host update`), the cost, and that archiving the host thread takes the proxy
+offline. Point to
 `reference/operations.md` for replacing the host.
 
 ## Safety rules
