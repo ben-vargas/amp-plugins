@@ -28,7 +28,7 @@ fetch them. To pick up template changes in a host project: `.agents/cliproxy-hos
 | `enable` | Build if needed; write `config.yaml`; join the tailnet; `tailscale funnel --bg 8317`; `amp orb services ensure`; restart the service if the API key changed; create the host marker. |
 | `resume` | Only with the host marker: start the watchdog if it is not running; run `connect` if `tailscaled` is stopped or not `Running`; then check `/healthz` through every Funnel relay (2 tries). Healthy: leave `tailscaled` alone. Local proxy down: leave Tailscale alone. Otherwise repair (below). |
 | `status` | Source commit, binary version, marker, lease (last successful renewal, failures), watchdog (last check, last repair), last `resume` result, pause counts, Tailscale state, Funnel config, service state. |
-| `watchdog` | Command of the ad-hoc supervised service `cliproxy-watchdog` (started by `enable` and `resume`, stopped by `disable`). Every `CLIPROXY_WATCHDOG_INTERVAL` seconds (120): local `/healthz`, then public `/healthz` through every relay. Two public failures in a row while local is healthy trigger a repair, at most once per 10 minutes. A check that runs more than 3 minutes late records a `pause` event. |
+| `watchdog` | Command of the ad-hoc supervised service `cliproxy-watchdog` (started by `enable` and `resume`, stopped by `disable`). Every `CLIPROXY_WATCHDOG_INTERVAL` seconds (120): local `/healthz`, then public `/healthz` through every relay. Two public failures in a row while local is healthy trigger a repair, but not within 10 minutes of any earlier repair, including one by `resume`. A check that runs more than 3 minutes late records a `pause` event. |
 | `pauses [days]` | Lists pauses (default 7 days) from three signals: gaps over 60 s in the kernel's `clock pairing hypercall` messages (E2B logs one every 4 s, so the VM was stopped), gaps over 6 minutes in the Amp executor log `~/.cache/amp/logs/headless.log*` (the lease renewal writes to it every minute), and the watchdog's `pause` events. Kinds: `pause` (kernel heartbeat stopped), `unconfirmed` (before the kernel journal starts), `process-gap` (the VM kept running; only the Amp CLI stopped, such as during an update). |
 | `disable` | Remove the marker, stop the service, then in a separate systemd unit reset Funnel, `tailscale logout` (deletes the ephemeral node, frees the name), and disable `tailscaled`. The unit survives the Tailscale SSH session it cuts. |
 | `reclaim` | Rename through `<hostname>-tmp` back to `<hostname>`, `tailscale funnel reset`, re-apply Funnel. For a node that joined as `<hostname>-1` after the old machine is removed. |
@@ -36,8 +36,11 @@ fetch them. To pick up template changes in a host project: `.agents/cliproxy-hos
 
 A repair (`resume` or the watchdog) holds a lock so only one runs at a time. If `tailscaled`
 answers and Funnel is off, it turns Funnel back on. Otherwise it restarts `tailscaled`: after a
-pause it can report `Running` while its connections are dead. It then checks every relay again
-and writes `recovered`, `tailscaled_restart`, or `recovery_failed` to `events.log`. A
+pause it can report `Running` while its connections are dead. After a restart it waits up to 5
+minutes for every relay to answer: after a long pause Tailscale has deleted the ephemeral node,
+`connect` joins as a new node, and the relays took 2–4 minutes to reach it. It writes
+`recovered` (with `seconds`), `tailscaled_restart`, or `recovery_failed` to `events.log` and
+the repair time to `~/.config/cliproxy-host/last-repair`. A
 `tailscaled` that just started reports `NoState` or `Starting` for a few seconds, so `connect`
 waits for it to settle before deciding whether to join.
 

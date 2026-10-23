@@ -52,7 +52,6 @@ EVENTS="$STATE_DIR/events.log"
 WATCHDOG_SERVICE=cliproxy-watchdog
 WATCHDOG_INTERVAL="${CLIPROXY_WATCHDOG_INTERVAL:-120}"
 WD_FAILURES=0
-WD_LAST_RECOVERY=0
 CONFIG_CHANGED=0
 
 die() {
@@ -225,6 +224,9 @@ wait_for_public() {
 	return 1
 }
 
+# Epoch of the last repair by resume or the watchdog (0 if none).
+last_repair() { cat "$STATE_DIR/last-repair" 2>/dev/null || echo 0; }
+
 # Repairs public access. If tailscaled answers but Funnel is off, turning Funnel back on
 # is enough. Otherwise restart tailscaled: after a pause it can report Running while its
 # connections are dead. The lock keeps resume and the watchdog from repairing at once.
@@ -235,9 +237,10 @@ recover_public() {
 		if ! flock -n 9; then
 			# Another repair is running; wait for it, then repair only if it did not work.
 			echo "waiting for the public access repair that is already running"
-			flock -w 300 9 || exit 1
+			flock -w 400 9 || exit 1
 			public_ok 10 && exit 0
 		fi
+		date +%s >"$STATE_DIR/last-repair"
 		local serve
 		serve="$(timeout 10 sudo tailscale funnel status --json 2>/dev/null)" || serve=""
 		if [[ -n "$serve" ]] && ! jq -e '.AllowFunnel // {} | any' <<<"$serve" >/dev/null; then
@@ -252,14 +255,19 @@ recover_public() {
 		sudo systemctl restart tailscaled
 		wait_for_backend
 		(connect) || true
-		if wait_for_public 6 10; then
-			event recovered action=restart reason="$reason"
-			echo "public access restored by restarting tailscaled"
-			exit 0
-		fi
-		event recovery_failed reason="$reason"
-		echo "public access still failing after restarting tailscaled" >&2
-		exit 1
+		# After a long pause Tailscale has deleted the ephemeral node, connect joins as a new
+		# one, and the Funnel relays took 2 to 4 minutes to reach it. Wait up to 5 minutes.
+		local start="$SECONDS"
+		until public_ok 10; do
+			if ((SECONDS - start >= 300)); then
+				event recovery_failed reason="$reason"
+				echo "public access still failing 5 minutes after restarting tailscaled" >&2
+				exit 1
+			fi
+			sleep 5
+		done
+		event recovered action=restart reason="$reason" seconds="$((SECONDS - start))"
+		echo "public access restored by restarting tailscaled ($((SECONDS - start))s)"
 	) 9>"$STATE_DIR/recover.lock"
 }
 
@@ -358,7 +366,8 @@ cmd_resume() {
 }
 
 # One watchdog check. Two public failures in a row while the local proxy is healthy
-# trigger a repair, at most once every 10 minutes.
+# trigger a repair, but not within 10 minutes of any earlier repair, including one by
+# resume (a failure counted while that repair still waits for the relays is expected).
 watchdog_check() {
 	local now local_state public_state
 	now="$(date +%s)"
@@ -375,10 +384,9 @@ watchdog_check() {
 	else
 		local_state=ok public_state=fail WD_FAILURES=$((WD_FAILURES + 1))
 		echo "watchdog: public check failed while the local proxy is healthy ($WD_FAILURES in a row)"
-		if ((WD_FAILURES >= 2 && now - WD_LAST_RECOVERY >= 600)); then
+		if ((WD_FAILURES >= 2 && now - $(last_repair) >= 600)); then
 			event public_down failures="$WD_FAILURES"
 			if recover_public watchdog; then public_state=repaired; else public_state=repair_failed; fi
-			WD_LAST_RECOVERY="$(date +%s)"
 			WD_FAILURES=0
 		fi
 	fi
@@ -388,7 +396,7 @@ watchdog_check() {
 # write_watchdog_state <checked-epoch> <local> <public>
 write_watchdog_state() {
 	jq -n --argjson checked "$1" --arg local "$2" --arg public "$3" \
-		--argjson failures "$WD_FAILURES" --argjson repaired "$WD_LAST_RECOVERY" \
+		--argjson failures "$WD_FAILURES" --argjson repaired "$(last_repair)" \
 		--argjson interval "$WATCHDOG_INTERVAL" --argjson pid "$$" '{
 			checkedAt: ($checked | todate), local: $local, public: $public,
 			consecutivePublicFailures: $failures,
