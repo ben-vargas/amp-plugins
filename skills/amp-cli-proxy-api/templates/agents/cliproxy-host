@@ -434,15 +434,17 @@ cmd_watchdog() {
 # Reads "<start> <end> <source>" gaps on stdin (epoch seconds, sorted by start), merges
 # overlapping ones, and prints "<start> <end> <kind> <sources>". Bounds come from the most
 # precise source (kernel, then executor, then watchdog). Kinds: pause (the kernel heartbeat
-# stopped too), unconfirmed (no kernel heartbeat for that time), process-gap (the kernel
-# kept running, so only a process stopped, such as the Amp CLI during an update).
+# stopped too, or the watchdog overslept, which only happens when the VM is frozen; its
+# events outlive the kernel journal, which keeps about 12 hours here), unconfirmed (neither
+# covers that time), process-gap (the kernel kept running, so only a process stopped, such
+# as the Amp CLI during an update).
 # Argument: epoch of the first kernel heartbeat, or 0 if there is none.
 classify_gaps() {
 	awk -v kstart="$1" '
 		function rank(s) { return s == "kernel" ? 3 : s == "executor" ? 2 : 1 }
 		function flush() {
 			if (!n) return
-			kind = srcs ~ /kernel/ ? "pause" : (kstart == 0 || gs < kstart) ? "unconfirmed" : "process-gap"
+			kind = srcs ~ /kernel|watchdog/ ? "pause" : (kstart == 0 || gs < kstart) ? "unconfirmed" : "process-gap"
 			print bs, be, kind, srcs
 		}
 		{
@@ -514,8 +516,8 @@ cmd_pauses() {
 		echo "  $(fmt_time "$start") -> $(fmt_time "$end")  $(fmt_duration $((end - start)))  $kind ($srcs)"
 	done < <(pause_list "$since")
 	((n)) || echo "  none"
-	echo "kinds: pause = the VM stopped; unconfirmed = no kernel heartbeat for that time;"
-	echo "       process-gap = the VM kept running and only the Amp CLI or watchdog stopped"
+	echo "kinds: pause = the VM stopped (kernel heartbeat or watchdog); unconfirmed = only the"
+	echo "       executor log saw it; process-gap = the VM kept running and only the Amp CLI stopped"
 }
 
 status_lease() {
