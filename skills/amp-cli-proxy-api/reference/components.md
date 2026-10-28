@@ -24,6 +24,7 @@ fetch them. To pick up template changes in a host project: `.agents/cliproxy-hos
 | `fetch` | Shallow clone or hard reset of `src/` to `CLIPROXY_REF` of `CLIPROXY_REPO`. `latest` resolves to the highest stable `vX.Y.Z` tag (`git ls-remote`; suffixed tags such as `-rc1` are skipped). |
 | `build` | `fetch`, then `go build` to `bin/cli-proxy-api` with the resolved tag or ref as version, commit, and build date. |
 | `update` | `build`, then restart the `cliproxy` service. |
+| `update-tailscale` | `apt-get install --only-upgrade tailscale`, then, if `tailscaled` still runs an older version, restart it and wait up to 5 minutes for every Funnel relay. The package cannot restart the service in an orb (E2B's `policy-rc.d` refuses), so without this the old daemon keeps running. Records the restart as a repair so the watchdog does not restart again while the second relay catches up (about 3 minutes in practice). |
 | `serve` | `exec bin/cli-proxy-api --config config.yaml` (service command). |
 | `enable` | Build if needed; write `config.yaml`; join the tailnet; `tailscale funnel --bg 8317`; `amp orb services ensure`; restart the service if the API key changed; create the host marker. |
 | `resume` | Only with the host marker: start the watchdog if it is not running; run `connect` if `tailscaled` is stopped or not `Running`; then check `/healthz` through every Funnel relay (2 tries). Healthy: leave `tailscaled` alone. Local proxy down: leave Tailscale alone. Otherwise repair (below). |

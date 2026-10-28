@@ -9,6 +9,7 @@ Run in the host orb from the repository root (`~/workspace/repo`).
 | Lease, resume, and repair history | `tail -n 50 ~/.config/cliproxy-host/events.log` |
 | Watchdog logs | `amp orb service logs cliproxy-watchdog -n 50` |
 | Deploy the newest release (or the pinned `CLIPROXY_REF`) | `.agents/cliproxy-host update` |
+| Install a Tailscale release (security fixes) | `.agents/cliproxy-host update-tailscale`. Routed requests fail for about 15 seconds; run it detached or from the Terminal tab when the current thread is routed through the proxy. |
 | Refresh the skill from its published source | `.agents/cliproxy-host skill` |
 | Apply new skill templates to the host files | `.agents/cliproxy-host skill`, then `bash .agents/skills/amp-cli-proxy-api/scripts/scaffold.sh --force .`, then commit and push |
 | Follow logs | `sudo journalctl -u amp-svc-cliproxy -f` |

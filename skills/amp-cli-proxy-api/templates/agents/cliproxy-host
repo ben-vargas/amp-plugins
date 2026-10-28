@@ -10,6 +10,8 @@
 #            means the newest stable vX.Y.Z release tag, never a branch tip)
 #   build    fetch, then build bin/cli-proxy-api
 #   update   build, then restart the running proxy
+#   update-tailscale
+#            install the newest Tailscale release and restart tailscaled onto it
 #   serve    run the proxy in the foreground (the cliproxy service command)
 #   enable   write config.yaml, join the tailnet, turn on Funnel, start the proxy,
 #            and mark this orb as the host (the keep-alive plugin then holds it awake)
@@ -128,6 +130,45 @@ cmd_skill() {
 cmd_update() {
 	cmd_build
 	amp orb service restart cliproxy
+}
+
+# Installs the newest Tailscale release and moves tailscaled onto it. The package cannot
+# restart the service in an orb (E2B's policy-rc.d refuses), so without the restart here the
+# old daemon would keep running unpatched.
+cmd_update_tailscale() {
+	sudo apt-get update -qq -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/tailscale.list \
+		-o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0
+	sudo DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y -qq \
+		-o Dpkg::Options::=--force-confold tailscale
+	local installed running start
+	installed="$(tailscale version | head -n 1)"
+	if ! systemctl is-active --quiet tailscaled; then
+		echo "tailscale $installed installed; tailscaled is not running here"
+		return
+	fi
+	running="$(ts_json | jq -r '.Version // "" | split("-")[0]')"
+	if [[ "$running" == "$installed" ]]; then
+		echo "tailscaled already runs $installed"
+		return
+	fi
+	echo "restarting tailscaled: $running -> $installed (routed requests fail for about 15 seconds)"
+	EVENT_SOURCE=update-tailscale
+	event tailscale_update from="$running" to="$installed"
+	# Counts as a repair, so the watchdog does not restart tailscaled again while the
+	# second Funnel relay catches up (it took about 3 minutes).
+	date +%s >"$STATE_DIR/last-repair"
+	sudo systemctl restart tailscaled
+	wait_for_backend
+	connect
+	start="$SECONDS"
+	until public_ok 10; do
+		if ((SECONDS - start >= 300)); then
+			echo "warning: public endpoint still failing 5 minutes after the restart" >&2
+			return 1
+		fi
+		sleep 5
+	done
+	echo "public endpoint healthy on every relay after $((SECONDS - start))s"
 }
 
 cmd_serve() {
@@ -635,6 +676,7 @@ case "${1:-}" in
 fetch) cmd_fetch ;;
 build) cmd_build ;;
 update) cmd_update ;;
+update-tailscale) cmd_update_tailscale ;;
 serve) cmd_serve ;;
 enable) cmd_enable ;;
 resume) cmd_resume ;;
@@ -644,5 +686,5 @@ reclaim) cmd_reclaim ;;
 skill) cmd_skill ;;
 watchdog) cmd_watchdog ;;
 pauses) cmd_pauses "${2:-7}" ;;
-*) die "usage: $0 fetch|build|update|serve|enable|resume|status|disable|reclaim|skill|watchdog|pauses" ;;
+*) die "usage: $0 fetch|build|update|update-tailscale|serve|enable|resume|status|disable|reclaim|skill|watchdog|pauses" ;;
 esac
